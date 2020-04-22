@@ -35,7 +35,9 @@ import (
 const (
 	// https://golang.org/pkg/time/#pkg-constants
 	timestampFormat = "2006-01-02T15.04.05Z"
-	finalizerName   = "secret.finalizer.secrets-manager.tuenti.io"
+	finalizerName   = "secret.finalizer." + smv1alpha1.Group
+	managedByLabel  = "app.kubernetes.io/managed-by"
+	lastUpdateLabel = smv1alpha1.Group + "/lastUpdateTime"
 )
 
 // SecretDefinitionReconciler reconciles a SecretDefinition object
@@ -47,6 +49,16 @@ type SecretDefinitionReconciler struct {
 	APIReader            client.Reader
 	ReconciliationPeriod time.Duration
 	WatchNamespaces      map[string]bool
+}
+
+// Annotations to skip when copying from a SecretDef to a Secret
+var annotationsToSkip = map[string]bool{
+	corev1.LastAppliedConfigAnnotation: true,
+}
+
+// skipCopyAnnotation returns true if we should skip copying the annotation with the given annotation key
+func skipCopyAnnotation(key string) bool {
+	return annotationsToSkip[key]
 }
 
 // Helper functions to check and remove string from a slice of strings.
@@ -126,15 +138,33 @@ func (r *SecretDefinitionReconciler) getCurrentState(namespace string, name stri
 
 // upsertSecret will create or update a secret
 func (r *SecretDefinitionReconciler) upsertSecret(sDef *smv1alpha1.SecretDefinition, data map[string][]byte) error {
+	// Merge labels and annotations from the SecretDefinition
+	labels := map[string]string{
+		managedByLabel: "secrets-manager",
+	}
+
+	for k, v := range sDef.Labels {
+		labels[k] = v
+	}
+
+	annotations := map[string]string{
+		lastUpdateLabel: time.Now().Format(timestampFormat),
+	}
+
+	for k, v := range sDef.Annotations {
+		if skipCopyAnnotation(k) {
+			continue
+		}
+		annotations[k] = v
+	}
+
 	secret := &corev1.Secret{
 		Type: corev1.SecretType(sDef.Spec.Type),
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: sDef.Namespace,
-			Labels: map[string]string{
-				"managedBy":     "secrets-manager",
-				"lastUpdatedAt": time.Now().Format(timestampFormat),
-			},
-			Name: sDef.Spec.Name,
+			Annotations: annotations,
+			Labels:      labels,
+			Namespace:   sDef.Namespace,
+			Name:        sDef.Spec.Name,
 		},
 		Data: data,
 	}

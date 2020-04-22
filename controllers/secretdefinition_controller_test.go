@@ -11,8 +11,10 @@ import (
 
 	"reflect"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -126,6 +128,31 @@ var _ = Describe("SecretsManager", func() {
 				},
 			},
 		}
+		sdWithLabels = &smv1alpha1.SecretDefinition{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "secretdef-labels",
+				Annotations: map[string]string{
+					"tekton.dev/git-0":                         "github.com",
+					"kubernetes.io/last-applied-configuration": "test",
+				},
+				Labels: map[string]string{
+					"test.example.com/name": "test",
+					"name":                  "secret-labels",
+				},
+			},
+			Spec: smv1alpha1.SecretDefinitionSpec{
+				Name: "secret-labels",
+				Type: "Opaque",
+				KeysMap: map[string]smv1alpha1.DataSource{
+					"fooLabel": smv1alpha1.DataSource{
+						Path:     "secret/data/pathtosecret1",
+						Key:      "value",
+						Encoding: "base64",
+					},
+				},
+			},
+		}
 		sdExcludedNs = &smv1alpha1.SecretDefinition{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: "default",
@@ -229,6 +256,45 @@ var _ = Describe("SecretsManager", func() {
 			})
 			Expect(reflect.TypeOf(err2)).To(Equal(reflect.TypeOf(expectedErr)))
 			Expect(res).To(Equal(reconcile.Result{}))
+		})
+		It("Create a secretdefinition and read the labels and annotations", func() {
+			err := r.Create(context.Background(), sdWithLabels)
+			Expect(err).To(BeNil())
+			res, err2 := r.Reconcile(reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: sdWithLabels.Namespace,
+					Name:      sdWithLabels.Name,
+				},
+			})
+			Expect(res).ToNot(BeNil())
+			Expect(err2).To(BeNil())
+
+			_, err3 := r.getCurrentState("default", "secret-labels")
+			Expect(err3).To(BeNil())
+
+			reader := r.APIReader
+			secret := &corev1.Secret{}
+			err4 := reader.Get(r.Ctx, client.ObjectKey{
+				Namespace: sdWithLabels.Namespace,
+				Name:      "secret-labels",
+			}, secret)
+			Expect(err4).To(BeNil())
+
+			labels := secret.GetObjectMeta().GetLabels()
+			Expect(labels).To(Equal(map[string]string{
+				"app.kubernetes.io/managed-by": "secrets-manager",
+				"name":                         "secret-labels",
+				"test.example.com/name":        "test"}))
+
+			annotations := secret.GetObjectMeta().GetAnnotations()
+			// lastUpdateTime annotation is created
+			_, ok := annotations["secrets-manager.tuenti.io/lastUpdateTime"]
+			Expect(ok).To(BeTrue())
+			// annotations from the SecretDef are passed to the secret
+			Expect(annotations["tekton.dev/git-0"]).To(Equal("github.com"))
+			// annotations to be skipped are not copied
+			_, ok2 := annotations["kubernetes.io/last-applied-configuration"]
+			Expect(ok2).ToNot(BeNil())
 		})
 		It("Create a secretdefinition in a non-watched namespace", func() {
 			r2 := getReconciler()
